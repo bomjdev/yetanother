@@ -11,9 +11,6 @@ import (
 
 func ScanOne[T any](rows pgx.Rows) (T, error) {
 	v, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[T])
-	if errors.Is(err, pgx.ErrNoRows) {
-		return v, fmt.Errorf("%w: %w", ErrNotFound, err)
-	}
 	if err != nil {
 		return v, fmt.Errorf("collect one row: %w", err)
 	}
@@ -62,6 +59,21 @@ func Query2[T any](builder squirrel.SelectBuilder) func(ctx context.Context, exe
 			return nil, err
 		}
 		return Scan[T](rows)
+	}
+}
+
+func QueryOne2[T any](builder squirrel.SelectBuilder) func(ctx context.Context, executor Executor, query query.Query) (T, error) {
+	return func(ctx context.Context, executor Executor, query query.Query) (T, error) {
+		var v T
+		stmt, args, err := BuildQuery(query, builder)
+		if err != nil {
+			return v, err
+		}
+		rows, err := executor.Query(ctx, stmt, args...)
+		if err != nil {
+			return v, err
+		}
+		return ScanOne[T](rows)
 	}
 }
 
