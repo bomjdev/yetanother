@@ -19,9 +19,8 @@ type (
 		name         string
 	}
 
-	Interface interface {
-		Name() string
-		Task() *Task
+	Registrator interface {
+		RegisterTask(runner Runner)
 	}
 
 	Errors map[string]error
@@ -42,8 +41,10 @@ func (e Errors) Error() string {
 	return string(data)
 }
 
-func (r Runner) Register(v Interface) {
-	r.AddTask(v.Name(), v.Task())
+func (r Runner) Register(tasks ...Registrator) {
+	for _, task := range tasks {
+		task.RegisterTask(r)
+	}
 }
 
 func (r Runner) AddTask(name string, task *Task) {
