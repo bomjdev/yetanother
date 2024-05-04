@@ -31,26 +31,25 @@ func Scan[T any](rows pgx.Rows) ([]T, error) {
 	return v, nil
 }
 
-//
-//func Query[T any](query string) func(ctx context.Context, executor Executor, args ...any) ([]T, error) {
-//	return func(ctx context.Context, executor Executor, args ...any) ([]T, error) {
-//		rows, err := executor.Query(ctx, query, args...)
-//		if err != nil {
-//			return nil, err
-//		}
-//		return Scan[T](rows)
-//	}
-//}
-//
-//func QueryOne[T any](query string) func(ctx context.Context, executor Executor, args ...any) (T, error) {
-//	return func(ctx context.Context, executor Executor, args ...any) (T, error) {
-//		rows, err := executor.Query(ctx, query, args...)
-//		if err != nil {
-//			return *new(T), err
-//		}
-//		return ScanOne[T](rows)
-//	}
-//}
+func Query[T any](query string) func(ctx context.Context, executor Executor, args ...any) ([]T, error) {
+	return func(ctx context.Context, executor Executor, args ...any) ([]T, error) {
+		rows, err := executor.Query(ctx, query, args...)
+		if err != nil {
+			return nil, err
+		}
+		return Scan[T](rows)
+	}
+}
+
+func QueryOne[T any](query string) func(ctx context.Context, executor Executor, args ...any) (T, error) {
+	return func(ctx context.Context, executor Executor, args ...any) (T, error) {
+		rows, err := executor.Query(ctx, query, args...)
+		if err != nil {
+			return *new(T), err
+		}
+		return ScanOne[T](rows)
+	}
+}
 
 func Query2[T any](builder squirrel.SelectBuilder) func(ctx context.Context, executor Executor, query query.Query) ([]T, error) {
 	return func(ctx context.Context, executor Executor, query query.Query) ([]T, error) {
