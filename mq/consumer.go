@@ -8,65 +8,119 @@ import (
 	"log"
 )
 
-type Consumer[T any] struct {
-	channel  *amqp.Channel
-	exchange string
-	queue    string
+type (
+	Handler[T any]             func(ctx context.Context, v T) error
+	DeliveryHandler            Handler[amqp.Delivery]
+	HandlerWithDelivery[T any] func(ctx context.Context, v T, delivery amqp.Delivery) error
+	Consumer                   struct {
+		exchange string
+		queue    amqp.Queue
+		handlers map[string]DeliveryHandler
+		channel  *amqp.Channel
+	}
+)
+
+func NewConsumer(options Options, queue string) (Consumer, error) {
+	channel, err := options.createChannel()
+	if err != nil {
+		return Consumer{}, fmt.Errorf("create channel: %w", err)
+	}
+
+	if err = options.declareExchange(channel); err != nil {
+		return Consumer{}, err
+	}
+
+	q, err := channel.QueueDeclare(
+		queue,
+		true,
+		false,
+		false,
+		false,
+		nil,
+	)
+	if err != nil {
+		return Consumer{}, fmt.Errorf("queue declare %q: %w", queue, err)
+	}
+
+	return Consumer{
+		channel:  channel,
+		exchange: options.Exchange,
+		queue:    q,
+		handlers: make(map[string]DeliveryHandler),
+	}, nil
 }
 
-type Handler[T any] func(ctx context.Context, v T) error
-
-type Message[T any] struct {
-	Value    T
-	Delivery amqp.Delivery
+func (c Consumer) RegisterHandler(routingKey string, handler DeliveryHandler) {
+	c.handlers[routingKey] = handler
 }
 
-func (m Message[T]) Ack() error {
-	return m.Delivery.Ack(false)
+func (c Consumer) RegisterHandlers(handlers map[string]DeliveryHandler) {
+	for routingKey, handler := range handlers {
+		c.RegisterHandler(routingKey, handler)
+	}
 }
 
-func (m Message[T]) Nack() error {
-	return m.Delivery.Nack(false, true)
+func (c Consumer) BindKeys(routingKeys ...string) error {
+	for _, routingKey := range routingKeys {
+		log.Println("binding", c.queue.Name, routingKey)
+		if err := c.channel.QueueBind(
+			c.queue.Name,
+			routingKey,
+			c.exchange,
+			false,
+			nil,
+		); err != nil {
+			return fmt.Errorf("queue bind %q: %w", routingKey, err)
+		}
+	}
+	return nil
 }
 
-func (c Consumer[T]) Channel() *amqp.Channel {
-	return c.channel
-}
-
-func (c Consumer[T]) consumeLoop(ctx context.Context, msgs <-chan amqp.Delivery, messages chan<- Message[T]) {
-	for {
-		select {
-		case d, ok := <-msgs:
-			if !ok {
-				log.Printf("consume channel closed, exchange: %s, queue: %s", c.exchange, c.queue)
-				close(messages)
-				return
+func WithAutoAck[T any](handler Handler[T]) HandlerWithDelivery[T] {
+	return func(ctx context.Context, v T, delivery amqp.Delivery) error {
+		if err := handler(ctx, v); err != nil {
+			if nackErr := delivery.Nack(false, true); nackErr != nil {
+				return fmt.Errorf("nack: %w caused by: %w", nackErr, err)
 			}
+			return err
+		}
 
-			var value T
-			if err := json.Unmarshal(d.Body, &value); err != nil {
-				log.Printf("unmarshal: %s", err)
-				continue
-			}
+		if err := delivery.Ack(false); err != nil {
+			return fmt.Errorf("ack: %w", err)
+		}
 
-			messages <- Message[T]{
-				Value:    value,
-				Delivery: d,
-			}
+		return nil
+	}
+}
 
-		case <-ctx.Done():
-			if err := c.channel.Close(); err != nil {
-				log.Printf("close channel: %s", err)
-				close(messages)
-				return
+func WithDecoder[T any](decode func(amqp.Delivery) (T, error)) func(delivery HandlerWithDelivery[T]) DeliveryHandler {
+	return func(handler HandlerWithDelivery[T]) DeliveryHandler {
+		return func(ctx context.Context, delivery amqp.Delivery) error {
+			value, err := decode(delivery)
+			if err != nil {
+				return err
 			}
+			return handler(ctx, value, delivery)
 		}
 	}
 }
 
-func (c Consumer[T]) Consume(ctx context.Context) (<-chan Message[T], error) {
-	msgs, err := c.channel.Consume(
-		c.queue,
+func WithJSONDecoder[T any](handler HandlerWithDelivery[T]) DeliveryHandler {
+	return WithDecoder(jsonDecoder[T])(handler)
+}
+
+func jsonDecoder[T any](delivery amqp.Delivery) (T, error) {
+	var value T
+	if delivery.ContentType != "application/json" {
+		return value, fmt.Errorf("%q %d unexpected content type %q", delivery.RoutingKey, delivery.DeliveryTag, delivery.ContentType)
+	}
+	err := json.Unmarshal(delivery.Body, &value)
+	return value, err
+}
+
+func (c Consumer) Consume(ctx context.Context) error {
+	deliveries, err := c.channel.Consume(
+		c.queue.Name,
 		"",
 		false,
 		false,
@@ -75,63 +129,30 @@ func (c Consumer[T]) Consume(ctx context.Context) (<-chan Message[T], error) {
 		nil,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("consume: %w", err)
+		return err
 	}
 
-	ch := make(chan Message[T])
-
-	go c.consumeLoop(ctx, msgs, ch)
-
-	return ch, nil
-}
-
-func (c Consumer[T]) Run(ctx context.Context, handler Handler[T]) error {
-	return c.RunMessage(ctx, AutoAck(handler))
-}
-
-func (c Consumer[T]) RunMessage(ctx context.Context, handler Handler[Message[T]]) error {
-	ch, err := c.Consume(ctx)
-	if err != nil {
-		return fmt.Errorf("consume: %w", err)
-	}
-
-	for msg := range ch {
-		if err = handler(ctx, msg); err != nil {
-			fmt.Println("handler error", c.exchange, c.queue, err)
-		}
-	}
-
-	return nil
-}
-
-func AutoAck[T any](handler Handler[T]) Handler[Message[T]] {
-	return func(ctx context.Context, msg Message[T]) error {
-		if err := handler(ctx, msg.Value); err != nil {
-			if nackErr := msg.Nack(); nackErr != nil {
-				return fmt.Errorf("nack: %w caused by: %w", nackErr, err)
+	for {
+		select {
+		case delivery, open := <-deliveries:
+			if !open {
+				return fmt.Errorf("consume channel closed, exchange: %q, queue: %q", c.exchange, c.queue.Name)
 			}
-			return err
+
+			handler, ok := c.handlers[delivery.RoutingKey]
+			if !ok {
+				log.Printf("unknown routing key: %q", delivery.RoutingKey)
+				if err = delivery.Nack(false, true); err != nil {
+					return fmt.Errorf("nack %q %d: %w", delivery.RoutingKey, delivery.DeliveryTag, err)
+				}
+			}
+
+			if err = handler(ctx, delivery); err != nil {
+				log.Printf("handle %q %d: %s", delivery.RoutingKey, delivery.DeliveryTag, err)
+			}
+
+		case <-ctx.Done():
+			return ctx.Err()
 		}
-
-		if err := msg.Ack(); err != nil {
-			return fmt.Errorf("ack: %w", err)
-		}
-
-		return nil
 	}
-}
-
-func (c Consumer[T]) GetQueueSize() (int, error) {
-	q, err := c.channel.QueueDeclarePassive(
-		c.queue,
-		true,
-		false,
-		false,
-		false,
-		nil,
-	)
-	if err != nil {
-		return 0, fmt.Errorf("get queue: %w", err)
-	}
-	return q.Messages, nil
 }
