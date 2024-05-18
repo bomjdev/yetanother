@@ -3,9 +3,11 @@ package mq
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	amqp "github.com/rabbitmq/amqp091-go"
 	"log"
+	"time"
 )
 
 type (
@@ -13,7 +15,7 @@ type (
 	DeliveryHandler            Handler[amqp.Delivery]
 	HandlerWithDelivery[T any] func(ctx context.Context, v T, delivery amqp.Delivery) error
 	Consumer                   struct {
-		exchange string
+		options  Options
 		queue    amqp.Queue
 		handlers map[string]DeliveryHandler
 		channel  *amqp.Channel
@@ -44,7 +46,7 @@ func NewConsumer(options Options, queue string) (Consumer, error) {
 
 	return Consumer{
 		channel:  channel,
-		exchange: options.Exchange,
+		options:  options,
 		queue:    q,
 		handlers: make(map[string]DeliveryHandler),
 	}, nil
@@ -66,7 +68,7 @@ func (c Consumer) BindKeys(routingKeys ...string) error {
 		if err := c.channel.QueueBind(
 			c.queue.Name,
 			routingKey,
-			c.exchange,
+			c.options.Exchange,
 			false,
 			nil,
 		); err != nil {
@@ -119,6 +121,25 @@ func jsonDecoder[T any](delivery amqp.Delivery) (T, error) {
 }
 
 func (c Consumer) Consume(ctx context.Context) error {
+	for {
+		err := c.consume(ctx)
+		if errors.Is(err, errChanClosed) || errors.Is(err, amqp.ErrClosed) {
+			c.channel, err = c.options.createChannel()
+			if err != nil {
+				log.Println("consume channel creation error:", err)
+				time.Sleep(time.Second)
+			}
+			continue
+		} else {
+			log.Printf("consume error: %s", err)
+			return err
+		}
+	}
+}
+
+var errChanClosed = errors.New("channel closed")
+
+func (c Consumer) consume(ctx context.Context) error {
 	deliveries, err := c.channel.Consume(
 		c.queue.Name,
 		"",
@@ -136,23 +157,32 @@ func (c Consumer) Consume(ctx context.Context) error {
 		select {
 		case delivery, open := <-deliveries:
 			if !open {
-				return fmt.Errorf("consume channel closed, exchange: %q, queue: %q", c.exchange, c.queue.Name)
+				log.Printf("consume channel closed, queue: %q", c.queue.Name)
+				return errChanClosed
 			}
 
-			handler, ok := c.handlers[delivery.RoutingKey]
-			if !ok {
-				log.Printf("unknown routing key: %q", delivery.RoutingKey)
-				if err = delivery.Nack(false, true); err != nil {
-					return fmt.Errorf("nack %q %d: %w", delivery.RoutingKey, delivery.DeliveryTag, err)
-				}
-			}
-
-			if err = handler(ctx, delivery); err != nil {
-				log.Printf("handle %q %d: %s", delivery.RoutingKey, delivery.DeliveryTag, err)
+			if err = c.handleDelivery(ctx, delivery); err != nil {
+				return fmt.Errorf("handle delivery: %w", err)
 			}
 
 		case <-ctx.Done():
 			return ctx.Err()
 		}
 	}
+}
+
+func (c Consumer) handleDelivery(ctx context.Context, delivery amqp.Delivery) error {
+	handler, ok := c.handlers[delivery.RoutingKey]
+	if !ok {
+		log.Printf("unknown routing key: %q", delivery.RoutingKey)
+		if err := delivery.Nack(false, true); err != nil {
+			return fmt.Errorf("nack %q %d: %w", delivery.RoutingKey, delivery.DeliveryTag, err)
+		}
+	}
+
+	if err := handler(ctx, delivery); err != nil {
+		log.Printf("handle %q %d: %s", delivery.RoutingKey, delivery.DeliveryTag, err)
+	}
+
+	return nil
 }

@@ -3,8 +3,11 @@ package mq
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	amqp "github.com/rabbitmq/amqp091-go"
+	"log"
+	"time"
 )
 
 type (
@@ -53,13 +56,28 @@ func NewProducer(options Options) (RawProducer, error) {
 	}
 
 	return func(ctx context.Context, publishing amqp.Publishing, routingKey string) error {
-		return channel.PublishWithContext(
-			ctx,
-			options.Exchange,
-			routingKey,
-			false,
-			false,
-			publishing,
-		)
+		publish := func() error {
+			return channel.PublishWithContext(
+				ctx,
+				options.Exchange,
+				routingKey,
+				false,
+				false,
+				publishing,
+			)
+		}
+		return options.Conn.retry(ctx, func(ctx context.Context) error {
+			err = publish()
+			if errors.Is(err, amqp.ErrClosed) {
+				channel, err = options.createChannel()
+				if err != nil {
+					log.Println("produce channel creation error:", err)
+					time.Sleep(time.Second)
+					return err
+				}
+				return publish()
+			}
+			return err
+		})
 	}, nil
 }

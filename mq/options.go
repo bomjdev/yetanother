@@ -6,7 +6,7 @@ import (
 )
 
 type Options struct {
-	Conn     *amqp.Connection
+	Conn     *Connection
 	Exchange string
 	Kind     string
 }
