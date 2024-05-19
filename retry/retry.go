@@ -26,26 +26,10 @@ var (
 )
 
 func New(options ...Option) Retry {
-	return StopOnError(options...)
+	return NewExplicit(false, options...)
 }
 
-func IsErrStop(err error) bool {
-	return errors.Is(err, ErrStop)
-}
-
-func StopOnError(options ...Option) Retry {
-	return NewWithStopCondition(IsErrStop, options...)
-}
-
-func IsErrRetry(err error) bool {
-	return !errors.Is(err, ErrRetry)
-}
-
-func OnError(options ...Option) Retry {
-	return NewWithStopCondition(IsErrRetry, options...)
-}
-
-func NewWithStopCondition(stop StopCondition, options ...Option) Retry {
+func NewExplicit(explicit bool, options ...Option) Retry {
 	return func(ctx context.Context, fn Func) error {
 		for _, option := range options {
 			fn = option(fn)
@@ -61,7 +45,11 @@ func NewWithStopCondition(stop StopCondition, options ...Option) Retry {
 
 			errs = append(errs, err)
 
-			if stop(err) {
+			if explicit && !errors.Is(err, ErrRetry) {
+				return errors.Join(errs...)
+			}
+
+			if errors.Is(err, ErrStop) {
 				return errors.Join(errs...)
 			}
 		}
