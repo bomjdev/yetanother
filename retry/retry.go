@@ -17,11 +17,35 @@ type (
 		Func  DelayFunc
 		Max   time.Duration
 	}
+	StopCondition func(error) bool
 )
 
-var Err = errors.New("retry error")
+var (
+	ErrStop  = errors.New("retry error")
+	ErrRetry = errors.New("retry")
+)
 
 func New(options ...Option) Retry {
+	return StopOnError(options...)
+}
+
+func IsErrStop(err error) bool {
+	return errors.Is(err, ErrStop)
+}
+
+func StopOnError(options ...Option) Retry {
+	return NewWithStopCondition(IsErrStop, options...)
+}
+
+func IsErrRetry(err error) bool {
+	return !errors.Is(err, ErrRetry)
+}
+
+func OnError(options ...Option) Retry {
+	return NewWithStopCondition(IsErrRetry, options...)
+}
+
+func NewWithStopCondition(stop StopCondition, options ...Option) Retry {
 	return func(ctx context.Context, fn Func) error {
 		for _, option := range options {
 			fn = option(fn)
@@ -34,8 +58,10 @@ func New(options ...Option) Retry {
 			if err == nil {
 				return nil
 			}
+
 			errs = append(errs, err)
-			if errors.Is(err, Err) {
+
+			if stop(err) {
 				return errors.Join(errs...)
 			}
 		}
@@ -52,7 +78,7 @@ func MaxAttempts(n uint) Option {
 			}
 			i++
 			if i >= n {
-				err = fmt.Errorf("%w: %d attempts exceeded: %w", Err, n, err)
+				err = fmt.Errorf("%w: %d attempts exceeded: %w", ErrStop, n, err)
 
 			}
 			return err
@@ -84,7 +110,7 @@ func Timeout(duration time.Duration) Option {
 		start := time.Now()
 		return func(ctx context.Context) error {
 			if time.Since(start) > duration {
-				return fmt.Errorf("%w: timeout %s", Err, duration)
+				return fmt.Errorf("%w: timeout %s", ErrStop, duration)
 			}
 			return fn(ctx)
 		}
