@@ -2,10 +2,10 @@ package mq
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"github.com/bomjdev/yetanother/retry"
 	amqp "github.com/rabbitmq/amqp091-go"
+	"log"
 	"time"
 )
 
@@ -16,8 +16,8 @@ type Credentials struct {
 	Port     int
 }
 
-func Connect(creds Credentials) (*Connection, error) {
-	return ConnectWithString(fmt.Sprintf(
+func ConnectWithCredentials(creds Credentials) (*Connection, error) {
+	return Connect(fmt.Sprintf(
 		"amqp://%s:%s@%s:%d/",
 		creds.User,
 		creds.Password,
@@ -26,44 +26,79 @@ func Connect(creds Credentials) (*Connection, error) {
 	))
 }
 
-func ConnectWithString(creds string) (*Connection, error) {
-	conn, err := amqp.Dial(creds)
-	if err != nil {
-		return nil, fmt.Errorf("amqp dial: %w", err)
-	}
-	return &Connection{conn: conn, creds: creds, retry: retry.Factory(retry.Options{
-		Attempts:  5,
-		Delay:     time.Second,
-		MaxDelay:  time.Minute,
-		DelayFunc: retry.Double,
-	})}, nil
+var (
+	defaultRetry = retry.New(
+		retry.Delay(retry.DelayOptions{
+			Delay: 200 * time.Millisecond,
+			Func:  retry.DoubleDelay,
+			Max:   time.Minute,
+		}),
+		retry.Timeout(time.Hour),
+		func(next retry.Func) retry.Func {
+			return func(ctx context.Context) error {
+				err := next(ctx)
+				if err != nil {
+					log.Println("retry error:", err)
+				}
+				return err
+			}
+		},
+	)
+)
+
+func Connect(creds string) (*Connection, error) {
+	return NewConnection(creds, defaultRetry)
 }
 
 type Connection struct {
-	conn  *amqp.Connection
 	creds string
+	*amqp.Connection
 	retry retry.Retry
 }
 
-func (c *Connection) reconnect() error {
-	conn, err := amqp.Dial(c.creds)
+func NewConnection(creds string, retry retry.Retry) (*Connection, error) {
+	conn, err := amqp.Dial(creds)
 	if err != nil {
-		return fmt.Errorf("amqp reconnect dial: %w", err)
+		return nil, err
 	}
-	c.conn = conn
-	return nil
+	r := Connection{creds: creds, retry: retry, Connection: conn}
+	go r.loop()
+	return &r, nil
 }
 
-func (c *Connection) Channel() (channel *amqp.Channel, err error) {
-	err = c.retry(context.TODO(), func(_ context.Context) error {
-		channel, err = c.conn.Channel()
-		if errors.Is(err, amqp.ErrClosed) {
-			if err = c.reconnect(); err != nil {
-				return err
+func (c *Connection) loop() {
+	for {
+		reason, ok := <-c.NotifyClose(make(chan *amqp.Error))
+		log.Println("conn close:", reason, ok)
+		if err := c.retry(context.TODO(), func(ctx context.Context) error {
+			conn, err := amqp.Dial(c.creds)
+			if err == nil {
+				c.Connection = conn
 			}
-			return amqp.ErrClosed
+			return err
+		}); err != nil {
+			panic(err)
 		}
+	}
+}
+
+func (c *Connection) Channel() (ch *amqp.Channel, err error) {
+	return ch, c.retry(context.TODO(), func(ctx context.Context) error {
+		ch, err = c.Connection.Channel()
 		return err
 	})
-	return
+}
+
+func (c *Connection) NewChannel() (*Channel, error) {
+	channel, err := c.Channel()
+	if err != nil {
+		return nil, err
+	}
+	ch := Channel{
+		conn:    c,
+		Channel: channel,
+		retry:   c.retry,
+	}
+	go ch.loop()
+	return &ch, nil
 }

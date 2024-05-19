@@ -2,65 +2,91 @@ package retry
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 )
 
 type (
-	Func      func(ctx context.Context) error
-	Retry     func(ctx context.Context, f Func) error
-	DelayFunc func(d time.Duration) time.Duration
-	Options   struct {
-		Attempts  uint
-		Timeout   time.Duration
-		Delay     time.Duration
-		MaxDelay  time.Duration
-		DelayFunc DelayFunc
+	Func         func(ctx context.Context) error
+	Option       func(next Func) Func
+	Retry        func(ctx context.Context, fn Func) error
+	DelayFunc    func(duration time.Duration) time.Duration
+	DelayOptions struct {
+		Delay time.Duration
+		Func  DelayFunc
+		Max   time.Duration
 	}
 )
 
-func Factory(options Options) Retry {
-	return func(ctx context.Context, f Func) error {
-		var (
-			attempts uint
-			start    = time.Now()
-			cancel   context.CancelFunc
-		)
+var Err = errors.New("retry error")
 
-		if options.Timeout > 0 {
-			ctx, cancel = context.WithTimeout(ctx, options.Timeout)
-			defer cancel()
+func New(options ...Option) Retry {
+	return func(ctx context.Context, fn Func) error {
+		for _, option := range options {
+			fn = option(fn)
 		}
 
+		var errs []error
+
 		for {
-			if err := f(ctx); err == nil {
+			err := fn(ctx)
+			if err == nil {
 				return nil
 			}
-
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			default:
+			errs = append(errs, err)
+			if errors.Is(err, Err) {
+				return errors.Join(errs...)
 			}
+		}
+	}
+}
 
-			attempts++
-			if options.Attempts > 0 && attempts >= options.Attempts {
-				return fmt.Errorf("max %d attempts reached", options.Attempts)
+func MaxAttempts(n uint) Option {
+	return func(fn Func) Func {
+		var i uint
+		return func(ctx context.Context) error {
+			err := fn(ctx)
+			if err == nil {
+				return nil
 			}
+			i++
+			if i >= n {
+				err = fmt.Errorf("%w: %d attempts exceeded: %w", Err, n, err)
 
-			if options.Timeout > 0 && time.Since(start) > options.Timeout {
-				return fmt.Errorf("timeout %s exceeded", options.Timeout)
 			}
+			return err
+		}
+	}
+}
 
-			time.Sleep(options.Delay)
-
-			if options.DelayFunc != nil {
-				options.Delay = options.DelayFunc(options.Delay)
+func Delay(opt DelayOptions) Option {
+	return func(fn Func) Func {
+		delay := opt.Delay
+		return func(ctx context.Context) error {
+			err := fn(ctx)
+			if err != nil {
+				time.Sleep(delay)
+				if opt.Func != nil {
+					delay = opt.Func(delay)
+				}
+				if opt.Max != 0 {
+					delay = min(delay, opt.Max)
+				}
 			}
+			return err
+		}
+	}
+}
 
-			if options.MaxDelay > 0 && options.Delay > options.MaxDelay {
-				options.Delay = options.MaxDelay
+func Timeout(duration time.Duration) Option {
+	return func(fn Func) Func {
+		start := time.Now()
+		return func(ctx context.Context) error {
+			if time.Since(start) > duration {
+				return fmt.Errorf("%w: timeout %s", Err, duration)
 			}
+			return fn(ctx)
 		}
 	}
 }
@@ -72,5 +98,5 @@ func Exponential(factor int) DelayFunc {
 }
 
 var (
-	Double DelayFunc = Exponential(2)
+	DoubleDelay = Exponential(2)
 )

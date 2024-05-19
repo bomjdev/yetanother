@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"github.com/bomjdev/yetanother/utils"
 	"gopkg.in/yaml.v3"
 	"io"
 	"os"
@@ -21,6 +22,6 @@ func ReadConfigFromFile[T any](path string) (T, error) {
 	if err != nil {
 		return v, fmt.Errorf("open file: %w", err)
 	}
-	defer file.Close()
+	defer utils.LogDeferredError(file.Close)
 	return ReadConfig[T](file)
 }

@@ -7,7 +7,6 @@ import (
 	"fmt"
 	amqp "github.com/rabbitmq/amqp091-go"
 	"log"
-	"time"
 )
 
 type (
@@ -15,39 +14,43 @@ type (
 	DeliveryHandler            Handler[amqp.Delivery]
 	HandlerWithDelivery[T any] func(ctx context.Context, v T, delivery amqp.Delivery) error
 	Consumer                   struct {
-		options  Options
-		queue    amqp.Queue
+		channel  *Channel
+		queue    string
+		exchange string
 		handlers map[string]DeliveryHandler
-		channel  *amqp.Channel
 	}
 )
 
-func NewConsumer(options Options, queue string) (Consumer, error) {
-	channel, err := options.createChannel()
+func NewConsumer(connection *Connection, exchange, kind, queue string) (Consumer, error) {
+	channel, err := connection.NewChannel()
 	if err != nil {
-		return Consumer{}, fmt.Errorf("create channel: %w", err)
-	}
-
-	if err = options.declareExchange(channel); err != nil {
 		return Consumer{}, err
 	}
-
-	q, err := channel.QueueDeclare(
+	if err = channel.ExchangeDeclare(
+		exchange,
+		kind,
+		true,
+		false,
+		false,
+		false,
+		nil,
+	); err != nil {
+		return Consumer{}, err
+	}
+	if _, err = channel.QueueDeclare(
 		queue,
 		true,
 		false,
 		false,
 		false,
 		nil,
-	)
-	if err != nil {
-		return Consumer{}, fmt.Errorf("queue declare %q: %w", queue, err)
+	); err != nil {
+		return Consumer{}, err
 	}
-
 	return Consumer{
 		channel:  channel,
-		options:  options,
-		queue:    q,
+		exchange: exchange,
+		queue:    queue,
 		handlers: make(map[string]DeliveryHandler),
 	}, nil
 }
@@ -64,11 +67,11 @@ func (c Consumer) RegisterHandlers(handlers map[string]DeliveryHandler) {
 
 func (c Consumer) BindKeys(routingKeys ...string) error {
 	for _, routingKey := range routingKeys {
-		log.Println("binding", c.queue.Name, routingKey)
+		log.Println("binding", c.queue, routingKey)
 		if err := c.channel.QueueBind(
-			c.queue.Name,
+			c.queue,
 			routingKey,
-			c.options.Exchange,
+			c.exchange,
 			false,
 			nil,
 		); err != nil {
@@ -122,17 +125,9 @@ func jsonDecoder[T any](delivery amqp.Delivery) (T, error) {
 
 func (c Consumer) Consume(ctx context.Context) error {
 	for {
-		err := c.consume(ctx)
-		if errors.Is(err, errChanClosed) || errors.Is(err, amqp.ErrClosed) {
-			c.channel, err = c.options.createChannel()
-			if err != nil {
-				log.Println("consume channel creation error:", err)
-				time.Sleep(time.Second)
-			}
-			continue
-		} else {
-			log.Printf("consume error: %s", err)
-			return err
+		if err := c.consume(ctx); err != nil {
+			log.Println("consume error:", err)
+			//return err
 		}
 	}
 }
@@ -140,8 +135,9 @@ func (c Consumer) Consume(ctx context.Context) error {
 var errChanClosed = errors.New("channel closed")
 
 func (c Consumer) consume(ctx context.Context) error {
-	deliveries, err := c.channel.Consume(
-		c.queue.Name,
+	deliveries, err := c.channel.ConsumeWithContext(
+		ctx,
+		c.queue,
 		"",
 		false,
 		false,
@@ -157,7 +153,7 @@ func (c Consumer) consume(ctx context.Context) error {
 		select {
 		case delivery, open := <-deliveries:
 			if !open {
-				log.Printf("consume channel closed, queue: %q", c.queue.Name)
+				log.Printf("consume channel closed, queue: %q", c.queue)
 				return errChanClosed
 			}
 
