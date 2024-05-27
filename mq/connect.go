@@ -26,24 +26,22 @@ func ConnectWithCredentials(creds Credentials) (*Connection, error) {
 	))
 }
 
-var (
-	defaultRetry = retry.New(
-		retry.Delay(retry.DelayOptions{
-			Delay: 200 * time.Millisecond,
-			Func:  retry.DoubleDelay,
-			Max:   time.Minute,
-		}),
-		retry.Timeout(time.Hour),
-		func(next retry.Func) retry.Func {
-			return func(ctx context.Context) error {
-				err := next(ctx)
-				if err != nil {
-					log.Println("retry error:", err)
-				}
-				return err
+var defaultRetry = retry.New(
+	retry.Delay(retry.DelayOptions{
+		Delay: 200 * time.Millisecond,
+		Func:  retry.DoubleDelay,
+		Max:   15 * time.Second,
+	}),
+	retry.Timeout(10*time.Minute),
+	func(next retry.Func) retry.Func {
+		return func(ctx context.Context) error {
+			err := next(ctx)
+			if err != nil {
+				log.Println("retry error:", err)
 			}
-		},
-	)
+			return err
+		}
+	},
 )
 
 func Connect(creds string) (*Connection, error) {
