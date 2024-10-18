@@ -61,6 +61,8 @@ func recursiveBuildWhere(key string, filter query.Filter) (squirrel.Sqlizer, err
 			return squirrel.Lt{key: filter.Value}, nil
 		case "le":
 			return squirrel.LtOrEq{key: filter.Value}, nil
+		case "contains":
+			return squirrel.Like{key: fmt.Sprintf("%%%s%%", filter.Value)}, nil
 		default:
 			return nil, fmt.Errorf("unknown filter op %q", filter.Op)
 		}
