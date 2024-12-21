@@ -45,13 +45,13 @@ func Connect(ctx context.Context, credentials Credentials) (*pgxpool.Pool, error
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
 
-	cfg.BeforeConnect = func(ctx context.Context, config *pgx.ConnConfig) error {
-		config.Tracer = &tracelog.TraceLog{
-			Logger:   traceLog{l: log.Default()},
-			LogLevel: tracelog.LogLevelInfo,
-		}
-		return nil
-	}
+	//cfg.BeforeConnect = func(ctx context.Context, config *pgx.ConnConfig) error {
+	//	config.Tracer = &tracelog.TraceLog{
+	//		Logger:   traceLog{l: log.Default()},
+	//		LogLevel: tracelog.LogLevelInfo,
+	//	}
+	//	return nil
+	//}
 
 	cfg.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error {
 		pgxdecimal.Register(conn.TypeMap())

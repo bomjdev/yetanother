@@ -174,6 +174,7 @@ func (c Consumer) handleDelivery(ctx context.Context, delivery amqp.Delivery) er
 		if err := delivery.Nack(false, true); err != nil {
 			return fmt.Errorf("nack %q %d: %w", delivery.RoutingKey, delivery.DeliveryTag, err)
 		}
+		return nil
 	}
 
 	if err := handler(ctx, delivery); err != nil {
