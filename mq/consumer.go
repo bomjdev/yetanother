@@ -81,9 +81,11 @@ func (c Consumer) BindKeys(routingKeys ...string) error {
 	return nil
 }
 
+var ErrAck = errors.New("ack")
+
 func WithAutoAck[T any](handler Handler[T]) HandlerWithDelivery[T] {
 	return func(ctx context.Context, v T, delivery amqp.Delivery) error {
-		if err := handler(ctx, v); err != nil {
+		if err := handler(ctx, v); err != nil && !errors.Is(err, ErrAck) {
 			if nackErr := delivery.Nack(false, true); nackErr != nil {
 				return fmt.Errorf("nack: %w caused by: %w", nackErr, err)
 			}
